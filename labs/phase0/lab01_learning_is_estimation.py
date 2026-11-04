@@ -1,9 +1,9 @@
 """
 Lab 0.1 -- Learning is estimation
 =================================
-Part A: LS channel estimation three ways (closed form / gradient descent / LMS=SGD)
-        + what step size and pilot conditioning do to gradient descent
-        + MAP (= ridge = LMMSE here) vs MLE when pilots are scarce
+Part A: Linear regression three ways (closed form / gradient descent / minibatch SGD)
+        + what step size and feature scaling do to gradient descent
+        + MAP (= ridge regression) vs MLE when data is scarce: polynomial overfitting
 Part B: The "blur" problem -- why MSE-trained world models predict futures that never happen
 
 numpy only. Run from the repo root:  python3 labs/phase0/lab01_learning_is_estimation.py
@@ -13,121 +13,165 @@ import numpy as np
 rng = np.random.default_rng(0)
 
 
-def crandn(*shape):
-    return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)) / np.sqrt(2)
+def rmse(pred, y):
+    return np.sqrt(np.mean((pred - y) ** 2))
 
 
-def qpsk(*shape):
-    return (rng.choice([-1, 1], shape) + 1j * rng.choice([-1, 1], shape)) / np.sqrt(2)
+def rel_dist(w, w_ref):
+    return np.linalg.norm(w - w_ref) / np.linalg.norm(w_ref)
 
 
-def nmse_db(h_hat, h):
-    return 10 * np.log10(np.sum(np.abs(h_hat - h) ** 2) / np.sum(np.abs(h) ** 2))
+# ---------------------------------------------------------------------------
+# A toy house-price dataset (prices in thousands of euros)
+#   features: area (m^2), number of rooms, age (years)
+#   model:    price = w0 + w1*area + w2*rooms + w3*age + noise,  noise ~ N(0, 25^2)
+# ---------------------------------------------------------------------------
+def make_houses(n):
+    area = rng.uniform(40, 250, n)
+    rooms = np.clip(np.round(area / 35 + rng.normal(0, 0.8, n)), 1, 8)
+    age = rng.uniform(0, 80, n)
+    price = 50 + 3.0 * area + 8.0 * rooms - 0.8 * age + 25 * rng.standard_normal(n)
+    return np.stack([area, rooms, age], axis=1), price
 
+
+F_train, y = make_houses(500)
+F_test, y_test = make_houses(2000)
+mean, std = F_train.mean(0), F_train.std(0)
+
+
+def design(F, standardize):
+    Z = (F - mean) / std if standardize else F
+    return np.hstack([np.ones((len(F), 1)), Z])        # first column = intercept
+
+
+X, X_test = design(F_train, True), design(F_test, True)
+N = len(y)
 
 # ---------------------------------------------------------------------------
 # Part A.1 -- the same estimate, three ways
-#   model:  y = X h + n,   n ~ CN(0, s2 I)
-#   loss:   L(h) = (1/N) ||y - X h||^2           (= Gaussian NLL up to constants)
-#   grad:   dL/dh* = -(1/N) X^H (y - X h)       (Wirtinger gradient)
+#   loss:   L(w) = (1/2N) ||y - X w||^2        (= Gaussian NLL up to constants)
+#   grad:   dL/dw = -(1/N) X^T (y - X w)
 # ---------------------------------------------------------------------------
 print("=" * 72)
-print("PART A.1  LS closed form vs gradient descent vs LMS (= SGD, batch size 1)")
+print("PART A.1  Linear regression: closed form vs gradient descent vs minibatch SGD")
 print("=" * 72)
-L, N, snr_db = 4, 64, 10
-s2 = 10 ** (-snr_db / 10)
-h = crandn(L) / np.sqrt(L)
-X = qpsk(N, L)
-y = X @ h + np.sqrt(s2) * crandn(N)
+w_ls = np.linalg.solve(X.T @ X, X.T @ y)                # normal equations
 
-h_ls = np.linalg.solve(X.conj().T @ X, X.conj().T @ y)
-print(f"closed-form LS       NMSE vs true h: {nmse_db(h_ls, h):6.2f} dB")
 
-# full-batch gradient descent
-R = X.conj().T @ X / N
+def report(name, w):
+    gap = "" if w is w_ls else f"   distance to closed form {rel_dist(w, w_ls):.0e}"
+    print(f"  {name:<34} test RMSE {rmse(X_test @ w, y_test):6.2f} k€{gap}")
+
+
+report("closed form (normal equations)", w_ls)
+
+R = X.T @ X / N                                         # Hessian of L
 lam_max = np.linalg.eigvalsh(R).max()
-mu = 1.0 / lam_max
-h_gd = np.zeros(L, complex)
-for it in range(200):
-    grad = -(X.conj().T @ (y - X @ h_gd)) / N
-    h_gd = h_gd - mu * grad
-print(f"gradient descent     NMSE vs true h: {nmse_db(h_gd, h):6.2f} dB   "
-      f"|h_gd - h_ls| = {np.linalg.norm(h_gd - h_ls):.1e}")
+w_gd = np.zeros(X.shape[1])
+for it in range(500):
+    w_gd = w_gd + (1.0 / lam_max) * X.T @ (y - X @ w_gd) / N
+report("gradient descent, 500 steps", w_gd)
 
-# LMS: one pilot at a time, several passes ("epochs") over the data
-h_lms = np.zeros(L, complex)
-mu_lms = 0.02
-for epoch in range(50):
-    for n in rng.permutation(N):
-        e = y[n] - X[n] @ h_lms
-        h_lms = h_lms + mu_lms * X[n].conj() * e
-print(f"LMS / SGD            NMSE vs true h: {nmse_db(h_lms, h):6.2f} dB   "
-      f"|h_lms - h_ls| = {np.linalg.norm(h_lms - h_ls):.1e}  (noisy: never exactly LS)")
+
+def sgd(batch, lr0, steps=10_000, decay=False):
+    """Minibatch SGD; with decay, the learning rate shrinks as lr0 / (1 + k/2000)."""
+    w = np.zeros(X.shape[1])
+    k = 0
+    while k < steps:
+        order = rng.permutation(N)                      # one epoch = one pass in random order
+        for start in range(0, N, batch):
+            if k == steps:
+                break
+            b = order[start:start + batch]
+            lr = lr0 / (1 + k / 2000) if decay else lr0
+            w = w + lr * X[b].T @ (y[b] - X[b] @ w) / len(b)
+            k += 1
+    return w
+
+
+for batch, decay, label in [(1, False, "batch  1, constant lr"),
+                            (32, False, "batch 32, constant lr"),
+                            (1, True, "batch  1, decaying lr")]:
+    report(f"SGD, {label}", sgd(batch, 0.05, decay=decay))
+print("  (SGD: 10,000 steps each; distance = |w - w_ls| / |w_ls|)")
+print("  -> same answer; SGD keeps jittering around it, less with bigger batches or a decaying learning rate")
+print(f"  learned weights (standardized features): intercept {w_ls[0]:.1f}, area {w_ls[1]:.1f}, "
+      f"rooms {w_ls[2]:.1f}, age {w_ls[3]:.1f}")
 
 # ---------------------------------------------------------------------------
-# Part A.2 -- step size and conditioning
-#   GD on a quadratic is stable iff mu < 2 / lambda_max(R)
+# Part A.2 -- step size and feature scaling
+#   GD on a quadratic is stable iff lr < 2 / lambda_max(R)
 #   convergence speed ~ condition number kappa = lambda_max / lambda_min
 # ---------------------------------------------------------------------------
 print()
 print("=" * 72)
-print("PART A.2  Step size & pilot conditioning (same physics as LMS step-size rules)")
+print("PART A.2  Step size & feature scaling")
 print("=" * 72)
 
 
-def gd_iters_to_converge(X, y, mu, tol=1e-6, max_it=100000):
+def gd_iters_to_converge(X, y, lr, tol=1e-6, max_it=200_000):
     N = X.shape[0]
-    target = np.linalg.solve(X.conj().T @ X, X.conj().T @ y)
-    hh = np.zeros(X.shape[1], complex)
+    target = np.linalg.solve(X.T @ X, X.T @ y)
+    w = np.zeros(X.shape[1])
     for it in range(1, max_it + 1):
-        hh = hh + mu * (X.conj().T @ (y - X @ hh)) / N
-        err = np.linalg.norm(hh - target) / np.linalg.norm(target)
+        w = w + lr * X.T @ (y - X @ w) / N
+        err = np.linalg.norm(w - target) / np.linalg.norm(target)
         if not np.isfinite(err) or err > 1e6:
-            return "diverged"
+            return "diverges"
         if err < tol:
             return it
-    return f">{max_it}"
+    return f">{max_it:,}"
 
 
 for factor in [0.5, 1.0, 1.9, 2.1]:
-    print(f"  well-conditioned pilots, mu = {factor:.1f}/lambda_max -> "
+    print(f"  standardized features, lr = {factor:.1f}/lambda_max -> "
           f"iterations: {gd_iters_to_converge(X, y, factor / lam_max)}")
 
-# badly designed pilots: strongly correlated (low-pass filtered) sequence
-raw = qpsk(N + L)
-smooth = np.convolve(raw, np.ones(6) / 6, mode="same")
-X_bad = np.stack([smooth[i:i + N] for i in range(L)], axis=1)
-y_bad = X_bad @ h + np.sqrt(s2) * crandn(N)
-R_bad = X_bad.conj().T @ X_bad / N
-ev, ev_bad = np.linalg.eigvalsh(R), np.linalg.eigvalsh(R_bad)
-print(f"  condition number: good pilots {ev.max()/ev.min():6.1f}   bad pilots {ev_bad.max()/ev_bad.min():6.1f}")
-print(f"  iterations at mu = 1/lambda_max: good {gd_iters_to_converge(X, y, 1/ev.max())}, "
-      f"bad {gd_iters_to_converge(X_bad, y_bad, 1/ev_bad.max())}")
-print("  -> neural-net training has the same disease; Adam / normalization layers are the medicine")
+X_raw = design(F_train, False)
+ev = np.linalg.eigvalsh(R)
+ev_raw = np.linalg.eigvalsh(X_raw.T @ X_raw / N)
+print(f"  condition number: standardized {ev.max() / ev.min():9.1f}   raw (m^2, rooms, years) "
+      f"{ev_raw.max() / ev_raw.min():9.1f}")
+print(f"  iterations at lr = 1/lambda_max: standardized {gd_iters_to_converge(X, y, 1 / ev.max())}, "
+      f"raw {gd_iters_to_converge(X_raw, y, 1 / ev_raw.max())}")
+print("  -> always standardize inputs; in deep nets, normalization layers and Adam treat the same problem")
 
 # ---------------------------------------------------------------------------
-# Part A.3 -- MLE vs MAP when data is scarce
-#   prior h ~ CN(0, (1/L) I)  ->  MAP = (X^H X + L*s2 I)^-1 X^H y   (ridge / LMMSE)
+# Part A.3 -- MLE vs MAP when data is scarce: polynomial curve fitting
+#   y = sin(2 pi x) + noise,  noise ~ N(0, 0.3^2),  degree-9 polynomial features
+#   prior w ~ N(0, tau^2 I)  ->  MAP = (Phi^T Phi + (s^2/tau^2) I)^-1 Phi^T y   (ridge)
 # ---------------------------------------------------------------------------
 print()
 print("=" * 72)
-print("PART A.3  MLE (LS) vs MAP (ridge = LMMSE here), averaged over 2000 channels")
+print("PART A.3  MLE (least squares) vs MAP (ridge): degree-9 polynomial, 500 random datasets")
 print("=" * 72)
-print(f"  {'pilots N':>8} {'SNR dB':>7} {'LS NMSE':>9} {'MAP NMSE':>9}")
-for N_p, snr in [(4, 0), (8, 0), (8, 10), (64, 10)]:
-    s2p = 10 ** (-snr / 10)
-    e_ls = e_map = p = 0.0
-    for _ in range(2000):
-        hh = crandn(L) / np.sqrt(L)
-        Xp = qpsk(N_p, L)
-        yp = Xp @ hh + np.sqrt(s2p) * crandn(N_p)
-        A = Xp.conj().T @ Xp
-        b = Xp.conj().T @ yp
-        # lstsq, not solve: with N = L a 4x4 QPSK pilot matrix is sometimes exactly singular
-        e_ls += np.sum(np.abs(np.linalg.lstsq(Xp, yp, rcond=None)[0] - hh) ** 2)
-        e_map += np.sum(np.abs(np.linalg.solve(A + L * s2p * np.eye(L), b) - hh) ** 2)
-        p += np.sum(np.abs(hh) ** 2)
-    print(f"  {N_p:>8} {snr:>7} {10*np.log10(e_ls/p):>8.2f} {10*np.log10(e_map/p):>9.2f}")
+DEG, NOISE, TAU = 9, 0.3, 10.0
+lam = NOISE ** 2 / TAU ** 2
+
+
+def poly(x):
+    return np.vander(x, DEG + 1, increasing=True)      # columns 1, x, x^2, ..., x^9
+
+
+x_grid = np.linspace(0, 1, 500)
+f_grid = np.sin(2 * np.pi * x_grid)
+print(f"  prior: each weight ~ N(0, {TAU:.0f}^2)  ->  ridge lambda = {lam:.1e}")
+print(f"  {'points N':>8} {'MLE RMSE':>9} {'MAP RMSE':>9} {'MLE max|w|':>11} {'MAP max|w|':>11}")
+for n in [10, 15, 30, 100]:
+    e_ml, e_map, w_ml_max, w_map_max = [], [], [], []
+    for _ in range(500):
+        x = rng.uniform(0, 1, n)
+        t = np.sin(2 * np.pi * x) + NOISE * rng.standard_normal(n)
+        P = poly(x)
+        w_ml = np.linalg.lstsq(P, t, rcond=None)[0]
+        w_map = np.linalg.solve(P.T @ P + lam * np.eye(DEG + 1), P.T @ t)
+        e_ml.append(rmse(poly(x_grid) @ w_ml, f_grid))
+        e_map.append(rmse(poly(x_grid) @ w_map, f_grid))
+        w_ml_max.append(np.abs(w_ml).max())
+        w_map_max.append(np.abs(w_map).max())
+    print(f"  {n:>8} {np.median(e_ml):>9.2f} {np.median(e_map):>9.2f} "
+          f"{np.median(w_ml_max):>11.1e} {np.median(w_map_max):>11.1f}")
+print("  (medians over datasets; RMSE measured against the true curve sin(2 pi x) on [0, 1])")
 print("  -> the prior (= regularizer, 'weight decay') matters most when data is scarce")
 
 # ---------------------------------------------------------------------------
@@ -162,6 +206,6 @@ centers = (edges[:-1] + edges[1:]) / 2
 for c, pr in zip(centers, probs):
     print(f"    {c:+.1f} | {'#' * int(round(pr * 120))}")
 samples = rng.choice(centers, 10, p=probs)
-print("  10 imagined futures sampled from it:", np.array2string(samples, precision=1, sign="+"))
-print("  10 imagined futures from the MSE model:", np.array2string(np.full(10, pred_mse), precision=1, sign="+"))
+print("  10 imagined futures sampled from it:   ", np.array2string(samples, precision=1, sign="+", floatmode="fixed"))
+print("  10 imagined futures from the MSE model:", np.array2string(np.full(10, pred_mse), precision=1, sign="+", floatmode="fixed"))
 print("  -> an MSE world model 'imagines' the car going straight through the middle: a future that never happens")

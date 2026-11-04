@@ -72,7 +72,7 @@ The basic ideas: what "learning a model" means, and the classical version of a w
 
 | Week | Lesson | Lab | Status |
 |---|---|---|---|
-| 1 | [0.1 Learning is estimation](notes/0.1-learning-is-estimation.md): MLE, KL, loss functions, MAP, gradient descent | LS / GD / LMS, conditioning, MLE vs MAP, the blur problem | 🟡 check questions pending |
+| 1 | [0.1 Learning is estimation](notes/0.1-learning-is-estimation.md): MLE, KL, loss functions, MAP, gradient descent | Linear regression by closed form / GD / SGD, feature scaling, MLE vs MAP (polynomial overfitting), the blur problem | 🟡 check questions pending |
 | 1 | 0.2 Neural networks and PyTorch: MLP, backprop/autograd, Adam, generalization | Learn a nonlinear PA model (Rapp/Saleh) with an MLP; learned-variance head | ⬜ |
 | 2 | 0.3 Latent variables: EM → VAE (ELBO, reparameterization) | VAE on MNIST | ⬜ |
 | 3 | 0.4 Sequence models: RNN/GRU → attention → Transformer | Jakes-fading channel prediction: Kalman/AR vs GRU vs Transformer | ⬜ |
