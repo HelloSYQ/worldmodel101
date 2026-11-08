@@ -39,11 +39,19 @@ notes/     one Markdown file per lesson (math in LaTeX; GitHub renders it)
 labs/      runnable code, one folder per phase
 papers/    three-pass reading notes, each placed on the grid above
 answers/   check-question answers + feedback
+ladder/    Track L: one world model, built up step by step (see below)
 ```
 
 Setup: `pip install -r requirements.txt`, then run labs from the repo root, e.g. `python3 labs/phase0/lab01_learning_is_estimation.py`.
 
 ---
+
+## Two ways through
+
+- **Main track (theory first):** the phases below, in order.
+- **[Track L: the ladder](ladder/) (build first):** build one world model in week 1 (a pendulum with an EKF and an MPPI planner), then replace one given piece per step with a learned one: equations → ensemble → pixels → RSSM → policy in imagination → radio channel. Each step pulls in the main-track lessons it needs. Current step: [0, given everything](ladder/step0/), 🟡 predictions pending.
+
+The tracks share the destination but not the order, and you can switch between them.
 
 ## Syllabus and progress
 
